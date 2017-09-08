@@ -14,6 +14,7 @@ module JsonapiCompliable
         options[:meta]   ||= {}
         options[:expose] ||= {}
         options[:expose][:extra_fields] = query_hash[:extra_fields]
+        options[:object] = object
 
         if object.respond_to?(:resolve_stats)
           stats = object.resolve_stats
