@@ -149,6 +149,76 @@ if ENV["APPRAISAL_INITIALIZED"]
       end
     end
 
+    describe 'has_and_belongs_to_many nested relationship' do
+      let(:employee) { Employee.create!(first_name: 'Joe') }
+      let(:prior_team) { Team.new(name: 'prior') }
+      let(:disassociate_team) { Team.new(name: 'disassociate') }
+      let(:destroy_team) { Team.new(name: 'destroy') }
+      let(:associate_team) { Team.create!(name: 'preexisting') }
+
+      before do
+        employee.teams << prior_team
+        employee.teams << disassociate_team
+        employee.teams << destroy_team
+      end
+
+      let(:payload) do
+        {
+          data: {
+            id: employee.id,
+            type: 'employees',
+            relationships: {
+              teams: {
+                data: [
+                  { :'temp-id' => 'abc123', type: 'teams', method: 'create' },
+                  { id: prior_team.id.to_s, type: 'teams', method: 'update' },
+                  { id: disassociate_team.id.to_s, type: 'teams', method: 'disassociate' },
+                  { id: destroy_team.id.to_s, type: 'teams', method: 'destroy' },
+                  { id: associate_team.id.to_s, type: 'teams', method: 'update' }
+                ]
+              }
+            }
+          },
+          included: [
+            {
+              :'temp-id' => 'abc123',
+              type: 'teams',
+              attributes: { name: 'Team #1' }
+            },
+            {
+              id: prior_team.id.to_s,
+              type: 'teams',
+              attributes: { name: 'Updated!' }
+            },
+            {
+              id: associate_team.id.to_s,
+              type: 'teams'
+            }
+          ]
+        }
+      end
+
+      it 'can create/update/disassociate/associate/destroy' do
+        expect(employee.teams).to include(destroy_team)
+        expect(employee.teams).to include(disassociate_team)
+        do_put(employee.id)
+
+        # Should properly delete/create from the through table
+        combos = EmployeeTeam.all.map { |et| [et.employee_id, et.team_id] }
+        expect(combos.uniq.length).to eq(combos.length)
+
+        employee.reload
+        expect(employee.teams).to_not include(disassociate_team)
+        expect(employee.teams).to_not include(destroy_team)
+        expect { disassociate_team.reload }.to_not raise_error
+        expect { destroy_team.reload }.to raise_error(ActiveRecord::RecordNotFound)
+        expect(prior_team.reload.name).to include('Updated!')
+        expect(employee.teams).to include(associate_team)
+        expect((employee.teams - [prior_team, associate_team]).first.name)
+          .to eq('Team #1')
+      end
+    end
+
     describe 'nested polymorphic relationship' do
       let(:workspace_type) { 'offices' }
 
