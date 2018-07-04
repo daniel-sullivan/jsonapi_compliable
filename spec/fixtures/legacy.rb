@@ -1,5 +1,6 @@
 ActiveRecord::Schema.define(:version => 1) do
   create_table :authors do |t|
+    t.boolean :active, default: true
     t.string :first_name
     t.string :last_name
     t.string :dwelling_type
@@ -15,6 +16,12 @@ ActiveRecord::Schema.define(:version => 1) do
   end
 
   create_table :author_hobbies do |t|
+    t.integer :author_id
+    t.integer :hobby_id
+  end
+
+  # test non-standard table name
+  create_table :author_hobby do |t|
     t.integer :author_id
     t.integer :hobby_id
   end
@@ -37,6 +44,10 @@ ActiveRecord::Schema.define(:version => 1) do
     t.integer :author_id
     t.string :description
     t.string :picture
+  end
+
+  create_table :bio_labels do |t|
+    t.integer :bio_id
   end
 
   create_table :genres do |t|
@@ -110,6 +121,11 @@ end
 
 class Bio < LegacyApplicationRecord
   belongs_to :author
+  has_many :bio_labels
+end
+
+class BioLabel < LegacyApplicationRecord
+  belongs_to :bio
 end
 
 class Genre < LegacyApplicationRecord
@@ -212,6 +228,12 @@ class SerializableBio < LegacySerializableAbstract
   extra_attribute :created_at do
     Time.now
   end
+
+  has_many :bio_labels
+end
+
+class SerializableBioLabel < LegacySerializableAbstract
+  type 'bio_labels'
 end
 
 class SerializableState < LegacySerializableAbstract

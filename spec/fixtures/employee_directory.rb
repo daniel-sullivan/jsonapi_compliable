@@ -11,6 +11,15 @@ ActiveRecord::Schema.define(:version => 1) do
     t.string :address
   end
 
+  create_table :teams do |t|
+    t.string :name
+  end
+
+  create_table :employee_teams do |t|
+    t.integer :team_id
+    t.integer :employee_id
+  end
+
   create_table :employees do |t|
     t.string :workspace_type
     t.integer :workspace_id
@@ -29,15 +38,46 @@ ActiveRecord::Schema.define(:version => 1) do
   create_table :departments do |t|
     t.string :name
   end
+
+  create_table :salaries do |t|
+    t.integer :employee_id
+    t.decimal :base_rate
+    t.decimal :overtime_rate
+  end
 end
 
 class ApplicationRecord < ActiveRecord::Base
   self.abstract_class = true
+  attr_accessor :force_validation_error
+
+  before_save do
+    add_validation_error if force_validation_error
+
+    if Rails::VERSION::MAJOR >= 5
+      throw(:abort) if errors.present?
+    else
+      errors.blank?
+    end
+  end
+
+  def add_validation_error
+    errors.add(:base, 'Forced validation error')
+  end
 end
 
 class Classification < ApplicationRecord
   has_many :employees
   validates :description, presence: true
+end
+
+class Team < ApplicationRecord
+  has_many :employee_teams
+  has_many :employees, through: :employee_teams
+end
+
+class EmployeeTeam < ApplicationRecord
+  belongs_to :team
+  belongs_to :employee
 end
 
 class Office < ApplicationRecord
@@ -53,6 +93,24 @@ class Employee < ApplicationRecord
   belongs_to :classification
   has_many :positions
   validates :first_name, presence: true
+  validates :delete_confirmation,
+    presence: true,
+    on: :destroy
+
+  has_many :employee_teams
+  has_many :teams, through: :employee_teams
+
+  has_one :salary
+
+  before_destroy do
+    add_validation_error if force_validation_error
+
+    if Rails::VERSION::MAJOR >= 5
+      throw(:abort) if errors.present?
+    else
+      errors.blank?
+    end
+  end
 end
 
 class Position < ApplicationRecord
@@ -64,6 +122,10 @@ class Department < ApplicationRecord
   has_many :positions
 end
 
+class Salary < ApplicationRecord
+  belongs_to :employee
+end
+
 class ApplicationResource < JsonapiCompliable::Resource
   use_adapter JsonapiCompliable::Adapters::ActiveRecord
 end
@@ -71,6 +133,11 @@ end
 class ClassificationResource < ApplicationResource
   type :classifications
   model Classification
+end
+
+class TeamResource < ApplicationResource
+  type :teams
+  model Team
 end
 
 class DepartmentResource < ApplicationResource
@@ -98,6 +165,11 @@ class HomeOfficeResource < ApplicationResource
   model HomeOffice
 end
 
+class SalaryResource < ApplicationResource
+  type :salaries
+  model Salary
+end
+
 class EmployeeResource < ApplicationResource
   type :employees
   model Employee
@@ -110,6 +182,15 @@ class EmployeeResource < ApplicationResource
     scope: -> { Position.all },
     foreign_key: :employee_id,
     resource: PositionResource
+  has_and_belongs_to_many :teams,
+    resource: TeamResource,
+    scope: -> { Team.all },
+    foreign_key: { employee_teams: :employee_id }
+  has_one :salary,
+    resource: SalaryResource,
+    scope: -> { Salary.all },
+    foreign_key: :employee_id
+
   polymorphic_belongs_to :workspace,
     group_by: :workspace_type,
     groups: {
@@ -135,6 +216,12 @@ class SerializableClassification < SerializableAbstract
   attribute :description
 end
 
+class SerializableTeam < SerializableAbstract
+  type 'teams'
+
+  attribute :name
+end
+
 class SerializableEmployee < SerializableAbstract
   type 'employees'
 
@@ -144,6 +231,9 @@ class SerializableEmployee < SerializableAbstract
 
   belongs_to :classification
   has_many :positions
+  has_many :teams
+
+  has_one :salary
 end
 
 class SerializablePosition < SerializableAbstract
@@ -161,4 +251,11 @@ class SerializableDepartment < SerializableAbstract
   attribute :name
 
   has_many :positions
+end
+
+class SerializableSalary < SerializableAbstract
+  type 'salaries'
+
+  attribute :base_rate
+  attribute :overtime_rate
 end

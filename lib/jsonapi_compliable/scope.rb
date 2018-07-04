@@ -14,8 +14,7 @@ module JsonapiCompliable
   #     scope.resolve #=> [#<Post ...>, #<Post ...>, etc]
   #   end
   class Scope
-
-    attr_reader :object, :resource, :query
+    attr_reader :object, :unpaginated_object
 
     # @param object - The underlying, chainable base scope object
     # @param resource - The Resource that will process the object
@@ -65,6 +64,7 @@ module JsonapiCompliable
         []
       else
         resolved = @resource.resolve(@object)
+        yield resolved if block_given?
         sideload(resolved, query_hash[:include]) if query_hash[:include]
         resolved
       end
@@ -82,21 +82,53 @@ module JsonapiCompliable
     def sideload(results, includes)
       return if results == []
 
+      concurrent = ::JsonapiCompliable.config.experimental_concurrency
+      promises = []
+
       includes.each_pair do |name, nested|
-        if @resource.allowed_sideloads.has_key?(name)
-          sideload = @resource.sideload(name)
-          sideload.resolve(results, @query)
+        sideload = @resource.sideload(name)
+
+        if sideload.nil?
+          if JsonapiCompliable.config.raise_on_missing_sideload
+            raise JsonapiCompliable::Errors::InvalidInclude
+              .new(name, @resource.type)
+          end
+        else
+          namespace = Util::Sideload.namespace(@namespace, sideload.name)
+          resolve_sideload = -> { sideload.resolve(results, @query, namespace) }
+          if concurrent
+            promises << Concurrent::Promise.execute(&resolve_sideload)
+          else
+            resolve_sideload.call
+          end
+        end
+      end
+
+      if concurrent
+        # Wait for all promises to finish
+        while !promises.all? { |p| p.fulfilled? || p.rejected? }
+          sleep 0.01
+        end
+        # Re-raise the error with correct stacktrace
+        # OPTION** to avoid failing here?? if so need serializable patch
+        # to avoid loading data when association not loaded
+        if rejected = promises.find(&:rejected?)
+          raise rejected.reason
         end
       end
     end
 
-    def apply_scoping(opts)
-      @object = JsonapiCompliable::Scoping::DefaultFilter.new(@resource, query_hash, @object).apply
-      @object = JsonapiCompliable::Scoping::Filter.new(@resource, query_hash, @object).apply unless opts[:filter] == false
-      @object = JsonapiCompliable::Scoping::ExtraFields.new(@resource, query_hash, @object).apply unless opts[:extra_fields] == false
-      @object = JsonapiCompliable::Scoping::Sort.new(@resource, query_hash, @object).apply unless opts[:sort] == false
-      @unpaginated_object = @object
-      @object = JsonapiCompliable::Scoping::Paginate.new(@resource, query_hash, @object, default: opts[:default_paginate]).apply unless opts[:paginate] == false
+     def apply_scoping(opts)
+      add_scoping(nil, JsonapiCompliable::Scoping::DefaultFilter, opts)
+      add_scoping(:filter, JsonapiCompliable::Scoping::Filter, opts)
+      add_scoping(:extra_fields, JsonapiCompliable::Scoping::ExtraFields, opts)
+      add_scoping(:sort, JsonapiCompliable::Scoping::Sort, opts)
+      add_scoping(:paginate, JsonapiCompliable::Scoping::Paginate, opts, default: opts[:default_paginate])
+    end
+
+    def add_scoping(key, scoping_class, opts, default = {})
+      @object = scoping_class.new(@resource, query_hash, @object, default).apply unless opts[key] == false
+      @unpaginated_object = @object unless key == :paginate
     end
   end
 end

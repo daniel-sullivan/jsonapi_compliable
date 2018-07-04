@@ -39,9 +39,9 @@ module JsonapiCompliable
               parent.send(:"#{association_name}=", relevant_child)
             end
           end
-        end
 
-        instance_eval(&blk) if blk
+          instance_eval(&blk) if blk
+        end
       end
 
       def has_one(association_name, scope: nil, resource:, foreign_key:, primary_key: :id, &blk)
@@ -53,12 +53,30 @@ module JsonapiCompliable
             _scope.call.where(foreign_key => parent_ids.uniq.compact)
           end
 
+          # The 'assigned' code here is to remove all children that do not
+          # get assigned. This is because there is no 'limit(1)' in the query.
+          # If we did 'limit(1)' for the query, it wouldn't work for index
+          # actions (only 1 would come back, when we want one *per result*).
+          #
+          # Instead, avoid pagination in the query, assign only one result, and
+          # remove anything else. This is more or less what AR does.
           assign do |parents, children|
+            assigned = []
             parents.each do |parent|
               parent.association(association_name).loaded!
               relevant_child = children.find { |c| c.send(foreign_key) == parent.send(primary_key) }
               next unless relevant_child
-              parent.association(association_name).replace(relevant_child, false)
+
+              # Use private methods because of Rails bug
+              # https://github.com/rails/rails/issues/32886
+              association = parent.association(association_name)
+              association.send(:set_owner_attributes, relevant_child)
+              association.send(:set_inverse_instance, relevant_child)
+              association.send(:target=, relevant_child)
+              assigned << relevant_child
+            end
+            (children - assigned).each do |unassigned|
+              children.delete(unassigned)
             end
           end
 
@@ -76,7 +94,14 @@ module JsonapiCompliable
             parent_ids = parents.map { |p| p.send(primary_key) }
             parent_ids.uniq!
             parent_ids.compact!
-            _scope.call.joins(through).where(through => { fk => parent_ids }).distinct
+
+            table_name = parents[0]
+              .class.reflections[through.to_s].klass.table_name
+
+            _scope.call
+              .includes(through)
+              .where(table_name => { fk => parent_ids })
+              .distinct
           end
 
           assign do |parents, children|

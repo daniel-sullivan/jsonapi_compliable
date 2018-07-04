@@ -132,36 +132,6 @@ module JsonapiCompliable
       @sideloading ||= Sideload.new(:base, resource: self)
     end
 
-    # Set the sideload whitelist. You may want to omit sideloads for
-    # security or performance reasons.
-    #
-    # Uses JSONAPI::IncludeDirective from {{http://jsonapi-rb.org jsonapi-rb}}
-    #
-    # @example Whitelisting Relationships
-    #   # Given the following whitelist
-    #   class PostResource < ApplicationResource
-    #     # ... code ...
-    #     sideload_whitelist([:blog, { comments: :author }])
-    #   end
-    #
-    #   # A request to sideload 'tags'
-    #   #
-    #   # GET /posts?include=tags
-    #   #
-    #   # ...will silently fail.
-    #   #
-    #   # A request for comments and tags:
-    #   #
-    #   # GET /posts?include=tags,comments
-    #   #
-    #   # ...will only sideload comments
-    #
-    # @param [Hash, Array, Symbol] whitelist
-    # @see Query#include_hash
-    def self.sideload_whitelist(whitelist)
-      config[:sideload_whitelist] = JSONAPI::IncludeDirective.new(whitelist).to_hash
-    end
-
     # Whitelist a filter
     #
     # @example Basic Filtering
@@ -202,7 +172,8 @@ module JsonapiCompliable
       config[:filters][name.to_sym] = {
         aliases: aliases,
         if: opts[:if],
-        filter: blk
+        filter: blk,
+        required: opts[:required].respond_to?(:call) ? opts[:required] : !!opts[:required]
       }
     end
 
@@ -284,6 +255,29 @@ module JsonapiCompliable
     # @param [Class] klass The associated Model class
     def self.model(klass)
       config[:model] = klass
+    end
+
+    # Register a hook that fires AFTER all validation logic has run -
+    # including validation of nested objects - but BEFORE the transaction
+    # has closed.
+    #
+    # Helpful for things like "contact this external service after persisting
+    # data, but roll everything back if there's an error making the service call"
+    #
+    # @param [Hash] +only: [:create, :update, :destroy]+
+    def self.before_commit(only: [:create, :update, :destroy], &blk)
+      Array(only).each do |verb|
+        config[:before_commit][verb] = blk
+      end
+    end
+
+    # Actually fire the before commit hooks
+    #
+    # @see .before_commit
+    # @api private
+    def before_commit(model, method)
+      hook = self.class.config[:before_commit][method]
+      hook.call(model) if hook
     end
 
     # Define custom sorting logic
@@ -413,7 +407,6 @@ module JsonapiCompliable
     def self.config
       @config ||= begin
         {
-          sideload_whitelist: {},
           filters: {},
           default_filters: {},
           extra_fields: {},
@@ -421,6 +414,7 @@ module JsonapiCompliable
           sorting: nil,
           pagination: nil,
           model: nil,
+          before_commit: {},
           adapter: Adapters::Abstract.new
         }
       end
@@ -518,7 +512,7 @@ module JsonapiCompliable
     # @see .model
     # @see Adapters::ActiveRecord#update
     # @param [Hash] update_params The relevant attributes, including id and foreign keys
-    # @return [Object] an instance of the just-created model
+    # @return [Object] an instance of the just-updated model
     def update(update_params)
       adapter.update(model, update_params)
     end
@@ -538,72 +532,39 @@ module JsonapiCompliable
     # @see .model
     # @see Adapters::ActiveRecord#destroy
     # @param [String] id The +id+ of the relevant Model
-    # @return [Object] an instance of the just-created model
+    # @return [Object] an instance of the just-destroyed model
     def destroy(id)
       adapter.destroy(model, id)
     end
 
+    # Delegates #associate to adapter. Built for overriding.
+    #
+    # @see .use_adapter
+    # @see Adapters::Abstract#associate
+    # @see Adapters::ActiveRecord#associate
+    def associate(parent, child, association_name, type)
+      adapter.associate(parent, child, association_name, type)
+    end
+
+    # Delegates #disassociate to adapter. Built for overriding.
+    #
+    # @see .use_adapter
+    # @see Adapters::Abstract#disassociate
+    # @see Adapters::ActiveRecord#disassociate
+    def disassociate(parent, child, association_name, type)
+      adapter.disassociate(parent, child, association_name, type)
+    end
+
     # @api private
-    def persist_with_relationships(meta, attributes, relationships)
+    def persist_with_relationships(meta, attributes, relationships, caller_model = nil)
       persistence = JsonapiCompliable::Util::Persistence \
-        .new(self, meta, attributes, relationships)
+        .new(self, meta, attributes, relationships, caller_model)
       persistence.run
     end
 
-    # All possible sideload names, including nested names
-    #
-    #   { comments: { author: {} } }
-    #
-    # Becomes
-    #
-    #   [:comments, :author]
-    #
-    # @see Sideload#to_hash
-    # @return [Array<Symbol>] the list of association names
+    # @see Sideload#association_names
     def association_names
-      @association_names ||= begin
-        if sideloading
-          Util::Hash.keys(sideloading.to_hash[:base])
-        else
-          []
-        end
-      end
-    end
-
-    # An Include Directive Hash of all possible sideloads for the current
-    # context namespace, taking into account the sideload whitelist.
-    #
-    # In other words, say we have this resource:
-    #
-    #   class PostResource < ApplicationResource
-    #     sideload_whitelist({
-    #       index: :comments,
-    #       show: { comments: :author }
-    #     })
-    #   end
-    #
-    # Expected behavior:
-    #
-    #   allowed_sideloads(:index) # => { comments: {} }
-    #   allowed_sideloads(:show) # => { comments: { author: {} }
-    #
-    #   instance.with_context({}, :index) do
-    #     instance.allowed_sideloads # => { comments: {} }
-    #   end
-    #
-    # @see Util::IncludeParams.scrub
-    # @see #with_context
-    # @param [Symbol] namespace Can be :index/:show/etc - The current context namespace will be used by default.
-    # @return [Hash] the scrubbed include directive
-    def allowed_sideloads(namespace = nil)
-      return {} unless sideloading
-
-      namespace ||= context_namespace
-      sideloads = sideloading.to_hash[:base]
-      if !sideload_whitelist.empty? && namespace
-        sideloads = Util::IncludeParams.scrub(sideloads, sideload_whitelist[namespace])
-      end
-      sideloads
+      sideloading.association_names
     end
 
     # The relevant proc for the given attribute and calculation.
@@ -692,12 +653,6 @@ module JsonapiCompliable
       self.class.config[:extra_fields]
     end
 
-    # @see .sideload_whitelist
-    # @api private
-    def sideload_whitelist
-      self.class.config[:sideload_whitelist]
-    end
-
     # @see .default_filter
     # @api private
     def default_filters
@@ -774,7 +729,8 @@ module JsonapiCompliable
         adapter.transaction(model) do
           response = yield
         end
-      rescue Errors::ValidationError
+      rescue Errors::ValidationError => e
+        response = e.validation_response
       end
       response
     end
