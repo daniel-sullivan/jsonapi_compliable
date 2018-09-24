@@ -107,7 +107,7 @@ module JsonapiCompliable
 
       # (see Adapters::Abstract#update)
       def update(model_class, update_params)
-        instance = model_class.find(update_params.delete(:id))
+        instance = model_class.find(update_params)
         instance.update_attributes(update_params)
         instance
       end
