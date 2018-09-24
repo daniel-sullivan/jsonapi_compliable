@@ -17,6 +17,10 @@ RSpec.describe 'filtering' do
       allow_filter :temp do |scope, value, ctx|
         scope.where(id: ctx.runtime_id)
       end
+
+      allow_filter :by_json do |scope, value|
+        scope.where(id: value['id'])
+      end
     end
   end
 
@@ -87,13 +91,23 @@ RSpec.describe 'filtering' do
     end
   end
 
+  context 'when filter is escaped JSON' do
+    before do
+      params[:filter] = { by_json: '{{{ "id": 2 }}}' }
+    end
+
+    it 'works' do
+      ids = scope.resolve.map(&:id)
+      expect(ids).to eq([author2.id])
+    end
+  end
+
   context 'when filter is a {{string}} with a comma' do
     before do
       params[:filter] = { first_name: '{{foo,bar}}' }
       author2.update_attribute(:first_name, 'foo,bar')
     end
 
-    # todo test dont convert to single el array
     it 'does not convert to array' do
       ids = scope.resolve.map(&:id)
       expect(ids).to eq([author2.id])
@@ -128,6 +142,38 @@ RSpec.describe 'filtering' do
       it 'works correctly' do
         ids = scope.resolve.map(&:id)
         expect(ids).to eq([author2.id, author3.id])
+      end
+    end
+  end
+
+  context 'when filter is a {{string}} without a comma' do
+    before do
+      params[:filter] = { first_name: '{{foo}}' }
+      author2.update_attribute(:first_name, 'foo')
+    end
+
+    it 'does not convert to array' do
+      ids = scope.resolve.map(&:id)
+      expect(ids).to eq([author2.id])
+    end
+
+    it 'yields single element, not array' do
+      query = Author.all
+      expect(query).to receive(:where)
+                         .with(first_name: "foo").and_call_original
+      allow(Author).to receive(:all) { query }
+      scope.resolve
+    end
+
+    context 'when an escaped string contains quoted strings' do
+      before do
+        params[:filter] = { first_name: '{{"foo"}}' }
+        author2.update_attribute(:first_name, '"foo"')
+      end
+
+      it 'works correctly' do
+        ids = scope.resolve.map(&:id)
+        expect(ids).to eq([author2.id])
       end
     end
   end
